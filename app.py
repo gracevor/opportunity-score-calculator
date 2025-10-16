@@ -18,7 +18,7 @@ st.set_page_config(page_title="Opportunity Score Calculator", layout="wide")
 
 def valid_1_to_5(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
-    return s.between(1, 5)
+    return s.between(1, 5, inclusive='both')
 
 def calculate_top2_percentage_times_10(series: pd.Series) -> float:
     """Calculate (count of 4s and 5s / total count) * 10"""
@@ -204,6 +204,7 @@ def make_bubble(df_agg: pd.DataFrame):
         "#7C72FF", "#F4E162", "#5F00FF"
     ]
     
+    # Create the chart without problematic reference lines
     chart = (
         alt.Chart(df_agg)
         .mark_circle(opacity=0.75)
@@ -216,10 +217,8 @@ def make_bubble(df_agg: pd.DataFrame):
         )
         .properties(height=520)
     )
-    # Reference lines at 1.0 as requested
-    rules = alt.Chart(pd.DataFrame({"x": [1]})).mark_rule(strokeDash=[4, 4]).encode(x="x") | \
-            alt.Chart(pd.DataFrame({"y": [1]})).mark_rule(strokeDash=[4, 4]).encode(y="y")
-    return chart + rules
+    
+    return chart
 
 def download_chart(chart: alt.Chart, kind: str) -> bytes:
     spec = chart.to_dict()
