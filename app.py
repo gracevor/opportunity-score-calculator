@@ -204,18 +204,53 @@ def make_bubble(df_agg: pd.DataFrame):
         "#7C72FF", "#F4E162", "#5F00FF"
     ]
     
-    # Create the chart without problematic reference lines
+    # Create a column for the legend that uses mapped labels if available
+    df_display = df_agg.copy()
+    df_display['legend_label'] = df_display.apply(
+        lambda row: row['label'] if row['label'] != row['outcome_id'] else row['outcome_id'], 
+        axis=1
+    )
+    
+    # Get dynamic range for bubble sizes - make them MUCH more different
+    min_opp = df_agg['Opportunity'].min()
+    max_opp = df_agg['Opportunity'].max()
+    
+    # Create the chart with dramatically different bubble sizes and no size legend
     chart = (
-        alt.Chart(df_agg)
-        .mark_circle(opacity=0.75)
+        alt.Chart(df_display)
+        .mark_circle(opacity=0.75, stroke='white', strokeWidth=1)  # Add white border for clarity
         .encode(
             x=alt.X("Satisfaction", title="Satisfaction (0–10)", scale=alt.Scale(domain=[0, 10])),
             y=alt.Y("Importance", title="Importance (0–10)", scale=alt.Scale(domain=[0, 10])),
-            size=alt.Size("Opportunity", scale=alt.Scale(type="sqrt"), legend=alt.Legend(title="Opportunity")),
-            color=alt.Color("outcome_id", scale=alt.Scale(range=github_colors), legend=alt.Legend(title="Outcome")),
-            tooltip=["label", "outcome_id", "N", "Importance", "Satisfaction", "Opportunity"],
+            size=alt.Size(
+                "Opportunity", 
+                scale=alt.Scale(
+                    type="pow", exponent=2,  # Use power scale for more dramatic differences
+                    range=[50, 2000],  # Much wider range: tiny to huge bubbles
+                    domain=[min_opp, max_opp]
+                ), 
+                legend=None  # Remove the size legend completely
+            ),
+            color=alt.Color(
+                "legend_label", 
+                scale=alt.Scale(range=github_colors), 
+                legend=alt.Legend(
+                    title="Outcomes",
+                    titleFontSize=12,
+                    labelFontSize=10,
+                    labelLimit=200
+                )
+            ),
+            tooltip=[
+                alt.Tooltip("legend_label:N", title="Outcome"),
+                alt.Tooltip("outcome_id:N", title="ID"), 
+                alt.Tooltip("N:O", title="Sample Size"),
+                alt.Tooltip("Importance:Q", title="Importance", format=".2f"),
+                alt.Tooltip("Satisfaction:Q", title="Satisfaction", format=".2f"),
+                alt.Tooltip("Opportunity:Q", title="Opportunity", format=".2f")
+            ],
         )
-        .properties(height=520)
+        .properties(height=520, width=700)
     )
     
     return chart
