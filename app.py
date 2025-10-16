@@ -211,25 +211,39 @@ def make_bubble(df_agg: pd.DataFrame):
         axis=1
     )
     
-    # Get dynamic range for bubble sizes - make them MUCH more different
+    # Get dynamic ranges for both bubble sizes AND axis domains
     min_opp = df_agg['Opportunity'].min()
     max_opp = df_agg['Opportunity'].max()
     
-    # Create the chart with dramatically different bubble sizes and no size legend
+    # Get actual data ranges for axes with some padding
+    min_sat = max(0, df_agg['Satisfaction'].min() - 1)  # Don't go below 0
+    max_sat = min(10, df_agg['Satisfaction'].max() + 1)  # Don't go above 10
+    min_imp = max(0, df_agg['Importance'].min() - 1)
+    max_imp = min(10, df_agg['Importance'].max() + 1)
+    
+    # Create the chart with dynamic axes that fit your data
     chart = (
         alt.Chart(df_display)
-        .mark_circle(opacity=0.75, stroke='white', strokeWidth=1)  # Add white border for clarity
+        .mark_circle(opacity=0.75, stroke='white', strokeWidth=1)
         .encode(
-            x=alt.X("Satisfaction", title="Satisfaction (0–10)", scale=alt.Scale(domain=[0, 10])),
-            y=alt.Y("Importance", title="Importance (0–10)", scale=alt.Scale(domain=[0, 10])),
+            x=alt.X(
+                "Satisfaction", 
+                title="Satisfaction (0–10)", 
+                scale=alt.Scale(domain=[min_sat, max_sat], nice=True)  # Dynamic domain with padding
+            ),
+            y=alt.Y(
+                "Importance", 
+                title="Importance (0–10)", 
+                scale=alt.Scale(domain=[min_imp, max_imp], nice=True)  # Dynamic domain with padding
+            ),
             size=alt.Size(
                 "Opportunity", 
                 scale=alt.Scale(
-                    type="pow", exponent=2,  # Use power scale for more dramatic differences
-                    range=[50, 2000],  # Much wider range: tiny to huge bubbles
+                    type="pow", exponent=2,
+                    range=[200, 3000],  # Even larger bubbles for more impact
                     domain=[min_opp, max_opp]
                 ), 
-                legend=None  # Remove the size legend completely
+                legend=None
             ),
             color=alt.Color(
                 "legend_label", 
