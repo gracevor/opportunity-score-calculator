@@ -16,30 +16,19 @@ st.set_page_config(page_title="Opportunity Score Calculator", layout="wide")
 # Helpers: scales, validation, stats
 # =====================================
 
-def to_0_100_from_mean_1_to_10(x: pd.Series) -> pd.Series:
-    return (pd.to_numeric(x, errors="coerce") - 1.0) / 9.0 * 100.0
-
-def to_0_100_from_t2b_bool(x: pd.Series) -> pd.Series:
-    return pd.to_numeric(x, errors="coerce").astype(float) * 100.0
-
-def compute_t2b_flags_1_to_10(series: pd.Series) -> pd.Series:
+def valid_1_to_5(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
-    return s.ge(9.0)
+    return s.between(1, 5)
 
-def valid_1_to_10(series: pd.Series) -> pd.Series:
+def calculate_top2_percentage_times_10(series: pd.Series) -> float:
+    """Calculate (count of 4s and 5s / total count) * 10"""
     s = pd.to_numeric(series, errors="coerce")
-    return s.between(1, 10)
-
-def ci_95(series_pct: pd.Series):
-    clean = pd.to_numeric(series_pct, errors="coerce").dropna()
-    n = len(clean)
-    if n == 0:
-        return (np.nan, np.nan, np.nan)
-    mean = clean.mean()
-    sd = clean.std(ddof=1) if n > 1 else 0.0
-    se = sd / math.sqrt(n)
-    z = 1.96
-    return (mean, mean - z * se, mean + z * se)
+    valid_responses = s.between(1, 5)
+    if valid_responses.sum() == 0:
+        return 0.0
+    top2_count = s.ge(4.0).sum()
+    total_count = valid_responses.sum()
+    return (top2_count / total_count) * 10
 
 # =====================================
 # Helpers: wide to long auto-detection
@@ -92,47 +81,30 @@ def reshape_wide_autopair(df: pd.DataFrame, respondent_id_col: str) -> Tuple[pd.
     return long_df, pairing
 
 # =====================================
-# Aggregation and opportunity formulas
+# Aggregation and opportunity calculation
 # =====================================
 
-def aggregate(df_long: pd.DataFrame, agg_mode: str, formula: str, label_map: Dict[str, str]) -> pd.DataFrame:
-    mask_imp = valid_1_to_10(df_long["importance"])
-    mask_sat = valid_1_to_10(df_long["satisfaction"])
+def aggregate(df_long: pd.DataFrame, label_map: Dict[str, str]) -> pd.DataFrame:
+    mask_imp = valid_1_to_5(df_long["importance"])
+    mask_sat = valid_1_to_5(df_long["satisfaction"])
     valid = mask_imp & mask_sat
     dropped = int((~valid).sum())
     data = df_long.loc[valid].copy()
 
-    if agg_mode == "Means (1–10)":
-        data["imp_pct"] = to_0_100_from_mean_1_to_10(data["importance"])
-        data["sat_pct"] = to_0_100_from_mean_1_to_10(data["satisfaction"])
-    else:  # Top-2-Box (≥9)
-        data["imp_pct"] = to_0_100_from_t2b_bool(compute_t2b_flags_1_to_10(data["importance"]))
-        data["sat_pct"] = to_0_100_from_t2b_bool(compute_t2b_flags_1_to_10(data["satisfaction"]))
-
-    def opp_calc(imp_mean, sat_mean):
-        if formula == "Ulwick classic":
-            return imp_mean + (imp_mean - sat_mean)
-        if formula == "Weighted gap":
-            return 2 * imp_mean - sat_mean
-        if formula == "Capped gap":
-            return imp_mean + max(imp_mean - sat_mean, 0)
-        return np.nan
-
     rows = []
     for outcome, g in data.groupby("outcome_id"):
         n = len(g)
-        imp_mean, imp_lo, imp_hi = ci_95(g["imp_pct"])
-        sat_mean, sat_lo, sat_hi = ci_95(g["sat_pct"])
-        opp = opp_calc(imp_mean, sat_mean)
+        imp_score = calculate_top2_percentage_times_10(g["importance"])
+        sat_score = calculate_top2_percentage_times_10(g["satisfaction"])
+        opportunity = imp_score + (imp_score - sat_score)
+        
         rows.append({
-            "outcome_id": outcome,
             "label": label_map.get(str(outcome), str(outcome)),
+            "outcome_id": outcome,
             "N": n,
-            "Importance (0-100)": round(imp_mean, 2),
-            "Importance 95% CI": f"[{round(imp_lo,2)}, {round(imp_hi,2)}]",
-            "Satisfaction (0-100)": round(sat_mean, 2),
-            "Satisfaction 95% CI": f"[{round(sat_lo,2)}, {round(sat_hi,2)}]",
-            "Opportunity": round(opp, 2),
+            "Importance": round(imp_score, 2),
+            "Satisfaction": round(sat_score, 2),
+            "Opportunity": round(opportunity, 2),
         })
 
     out = pd.DataFrame(rows).sort_values(
@@ -140,30 +112,39 @@ def aggregate(df_long: pd.DataFrame, agg_mode: str, formula: str, label_map: Dic
     ).reset_index(drop=True)
 
     if dropped > 0:
-        st.info(f"Dropped {dropped} rows outside the 1–10 range or non-numeric.")
+        st.info(f"Dropped {dropped} rows outside the 1–5 range or with non-numeric values.")
     return out
 
 # =====================================
 # Charts and downloads
 # =====================================
 
-def make_bubble(df_agg: pd.DataFrame, color_hex: str):
+def make_bubble(df_agg: pd.DataFrame):
     if df_agg.empty:
         return None
+    
+    # GitHub brand colors
+    github_colors = [
+        "#096BDE", "#000AFF", "#6BD6D0", "#A9E500", "#FF507A", 
+        "#FFA6D6", "#8250DF", "#FF5934", "#2DA44E", "#00FF46", 
+        "#7C72FF", "#F4E162", "#5F00FF"
+    ]
+    
     chart = (
         alt.Chart(df_agg)
         .mark_circle(opacity=0.75)
         .encode(
-            x=alt.X("Satisfaction (0-100)", title="Satisfaction (0–100)"),
-            y=alt.Y("Importance (0-100)", title="Importance (0–100)"),
+            x=alt.X("Satisfaction", title="Satisfaction (0–10)", scale=alt.Scale(domain=[0, 10])),
+            y=alt.Y("Importance", title="Importance (0–10)", scale=alt.Scale(domain=[0, 10])),
             size=alt.Size("Opportunity", scale=alt.Scale(type="sqrt"), legend=alt.Legend(title="Opportunity")),
-            color=alt.value(color_hex),
-            tooltip=["label", "outcome_id", "N", "Importance (0-100)", "Satisfaction (0-100)", "Opportunity"],
+            color=alt.Color("outcome_id", scale=alt.Scale(range=github_colors), legend=alt.Legend(title="Outcome")),
+            tooltip=["label", "outcome_id", "N", "Importance", "Satisfaction", "Opportunity"],
         )
         .properties(height=520)
     )
-    rules = alt.Chart(pd.DataFrame({"x": [50]})).mark_rule(strokeDash=[4, 4]).encode(x="x") | \
-            alt.Chart(pd.DataFrame({"y": [50]})).mark_rule(strokeDash=[4, 4]).encode(y="y")
+    # Reference lines at 1.0 as requested
+    rules = alt.Chart(pd.DataFrame({"x": [1]})).mark_rule(strokeDash=[4, 4]).encode(x="x") | \
+            alt.Chart(pd.DataFrame({"y": [1]})).mark_rule(strokeDash=[4, 4]).encode(y="y")
     return chart + rules
 
 def download_chart(chart: alt.Chart, kind: str) -> bytes:
@@ -181,19 +162,15 @@ st.title("Opportunity Score Calculator")
 with st.expander("How to format your files"):
     st.markdown(
         """
-**This app auto-detects format. Follow these header rules.**
+**This app requires wide format CSV files.**
 
-**Option A — Long format (recommended)**  
-Columns must be exactly:  
-`respondent_id, outcome_id, importance, satisfaction`  
-All values are 1–10.
-
-**Option B — Wide format**  
+**Wide format requirements:**  
 - One column: `respondent_id`  
 - Importance columns start with `imp_` or `importance_`, for example `imp_outcome_1`  
 - Satisfaction columns start with `sat_` or `satisfaction_`, for example `sat_outcome_1`  
 - The stem after the prefix (for example `outcome_1`) must be identical for the pair  
 - Stems become your `outcome_id`
+- **All importance and satisfaction values must be on a 1–5 scale**
 
 **Optional label mapping (separate CSV)**  
 Upload a second CSV with columns:  
@@ -201,28 +178,19 @@ Upload a second CSV with columns:
 Example:  
 `outcome_1, Reduce mean time to fix vulnerabilities`  
 If provided, labels appear in the table, tooltips, and a legend below the chart.
+
+**Calculation method:**
+- Importance = (Count of 4s and 5s / Total responses) × 10
+- Satisfaction = (Count of 4s and 5s / Total responses) × 10  
+- Opportunity = Importance + (Importance - Satisfaction)
         """
     )
 
     # Templates
-    long_template = pd.DataFrame({
-        "respondent_id": ["R001", "R001", "R002"],
-        "outcome_id": ["outcome_1", "outcome_2", "outcome_1"],
-        "importance": [9, 8, 7],
-        "satisfaction": [6, 7, 8],
-    })
-    buf_long = io.StringIO(); long_template.to_csv(buf_long, index=False)
-    st.download_button(
-        "Download long-format CSV template",
-        buf_long.getvalue().encode("utf-8"),
-        file_name="oppscore_long_template.csv",
-        mime="text/csv",
-    )
-
     wide_template = pd.DataFrame({
-        "respondent_id": ["R001", "R002"],
-        "imp_outcome_1": [9, 7], "imp_outcome_2": [8, 9],
-        "sat_outcome_1": [6, 8], "sat_outcome_2": [7, 6],
+        "respondent_id": ["R001", "R002", "R003"],
+        "imp_outcome_1": [5, 4, 3], "imp_outcome_2": [4, 5, 4],
+        "sat_outcome_1": [3, 4, 5], "sat_outcome_2": [2, 3, 4],
     })
     buf_wide = io.StringIO(); wide_template.to_csv(buf_wide, index=False)
     st.download_button(
@@ -245,12 +213,8 @@ If provided, labels appear in the table, tooltips, and a legend below the chart.
     )
 
 st.sidebar.header("Upload your data")
-data_file = st.sidebar.file_uploader("Survey data CSV (long or wide)", type=["csv"])
+data_file = st.sidebar.file_uploader("Survey data CSV (wide format)", type=["csv"])
 map_file = st.sidebar.file_uploader("Optional: outcome label mapping CSV", type=["csv"])
-
-agg_mode = st.sidebar.radio("Aggregation", ["Means (1–10)", "Top-2-Box (≥9)"])
-formula = st.sidebar.selectbox("Opportunity formula", ["Ulwick classic", "Weighted gap", "Capped gap"], index=0)
-color_hex = st.sidebar.text_input("Bubble color (hex)", value="#3F51B5")
 
 label_map: Dict[str, str] = {}
 if map_file is not None:
@@ -275,71 +239,50 @@ if data_file is not None:
     st.write("Preview (first 10 rows):")
     st.dataframe(df.head(10), use_container_width=True)
 
-    cols_lower = {c.lower() for c in df.columns}
-    long_required = {"respondent_id", "outcome_id", "importance", "satisfaction"}
+    # Only support wide format
+    rid_candidates = [c for c in df.columns if c.lower() == "respondent_id"]
+    if not rid_candidates:
+        st.error("Wide format requires a 'respondent_id' column.")
+        st.stop()
+    
+    rid = rid_candidates[0]
+    long_df, pairing = reshape_wide_autopair(df, rid)
+    if long_df.empty:
+        st.error("Could not auto-detect any imp_/sat_ pairs. Check your headers.")
+        st.dataframe(pd.DataFrame({"hint": ["Use imp_outcome_1 and sat_outcome_1 style headers with 1-5 scale values"]}))
+        st.stop()
+    
+    st.success("Detected wide format and auto-paired columns.")
+    st.markdown("**Detected pairs**")
+    st.dataframe(pairing, use_container_width=True)
 
-    if long_required.issubset(cols_lower):
-        # Long format
-        colmap = {name: [c for c in df.columns if c.lower() == name][0] for name in long_required}
-        long_df = df[[colmap["respondent_id"], colmap["outcome_id"], colmap["importance"], colmap["satisfaction"]]]
-        long_df = long_df.rename(columns={
-            colmap["respondent_id"]: "respondent_id",
-            colmap["outcome_id"]: "outcome_id",
-            colmap["importance"]: "importance",
-            colmap["satisfaction"]: "satisfaction",
-        })
-        st.success("Detected long format.")
-    else:
-        # Wide format
-        rid_candidates = [c for c in df.columns if c.lower() == "respondent_id"]
-        if not rid_candidates:
-            st.error("Wide format requires a 'respondent_id' column.")
-            st.stop()
-        rid = rid_candidates[0]
-        long_df, pairing = reshape_wide_autopair(df, rid)
-        if long_df.empty:
-            st.error("Could not auto-detect any imp_/sat_ pairs. Check your headers.")
-            st.dataframe(pd.DataFrame({"hint": ["Use imp_outcome_1 and sat_outcome_1 style headers"]}))
-            st.stop()
-        st.success("Detected wide format and auto-paired columns.")
-        st.markdown("**Detected pairs**")
-        st.dataframe(pairing, use_container_width=True)
-
-    st.markdown("### Aggregated results")
-    agg = aggregate(long_df, agg_mode, formula, label_map)
-    if "label" in agg.columns:
-        order = [
-            "label", "outcome_id", "N",
-            "Importance (0-100)", "Importance 95% CI",
-            "Satisfaction (0-100)", "Satisfaction 95% CI",
-            "Opportunity",
-        ]
-        agg = agg[[c for c in order if c in agg.columns]]
+    st.markdown("### Results")
+    agg = aggregate(long_df, label_map)
     st.dataframe(agg, use_container_width=True)
 
     csv_text = agg.to_csv(index=False)
     st.download_button(
-        "Download aggregated CSV",
+        "Download results as CSV",
         data=csv_text.encode("utf-8"),
-        file_name="opportunity_aggregated.csv",
+        file_name="opportunity_results.csv",
         mime="text/csv",
     )
 
-    st.markdown("### Bubble chart")
-    chart = make_bubble(agg, color_hex)
+    st.markdown("### Opportunity Score Bubble Chart")
+    chart = make_bubble(agg)
     if chart is not None:
         st.altair_chart(chart, use_container_width=True)
         col1, col2 = st.columns(2)
         with col1:
             png_bytes = download_chart(chart, "PNG")
-            st.download_button("Download PNG", data=png_bytes, file_name="bubble.png", mime="image/png")
+            st.download_button("Download chart as PNG", data=png_bytes, file_name="opportunity_chart.png", mime="image/png")
         with col2:
             svg_bytes = download_chart(chart, "SVG")
-            st.download_button("Download SVG", data=svg_bytes, file_name="bubble.svg", mime="image/svg+xml")
+            st.download_button("Download chart as SVG", data=svg_bytes, file_name="opportunity_chart.svg", mime="image/svg+xml")
 
     if label_map:
         st.markdown("#### Outcome legend")
         legend_df = pd.DataFrame(sorted(label_map.items()), columns=["outcome_id", "label"])
         st.dataframe(legend_df, use_container_width=True)
 else:
-    st.info("Upload a CSV to begin. Use the templates above if needed.")
+    st.info("Upload a wide-format CSV to begin. Use the template above if needed.")
