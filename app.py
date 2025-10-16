@@ -23,10 +23,11 @@ def valid_1_to_5(series: pd.Series) -> pd.Series:
 def calculate_top2_percentage_times_10(series: pd.Series) -> float:
     """Calculate (count of 4s and 5s / total count) * 10"""
     s = pd.to_numeric(series, errors="coerce")
-    valid_responses = s.between(1, 5)
+    # Only count valid responses in 1-5 range (excludes NaN/null)
+    valid_responses = s.between(1, 5, inclusive='both')
     if valid_responses.sum() == 0:
         return 0.0
-    top2_count = s.ge(4.0).sum()
+    top2_count = s.ge(4.0).sum()  # This already excludes NaN values
     total_count = valid_responses.sum()
     return (top2_count / total_count) * 10
 
@@ -85,23 +86,82 @@ def reshape_wide_autopair(df: pd.DataFrame, respondent_id_col: str) -> Tuple[pd.
 # =====================================
 
 def aggregate(df_long: pd.DataFrame, label_map: Dict[str, str]) -> pd.DataFrame:
-    mask_imp = valid_1_to_5(df_long["importance"])
-    mask_sat = valid_1_to_5(df_long["satisfaction"])
-    valid = mask_imp & mask_sat
-    dropped = int((~valid).sum())
-    data = df_long.loc[valid].copy()
-
+    # Process each outcome separately to handle missing data properly
     rows = []
-    for outcome, g in data.groupby("outcome_id"):
-        n = len(g)
-        imp_score = calculate_top2_percentage_times_10(g["importance"])
-        sat_score = calculate_top2_percentage_times_10(g["satisfaction"])
+    calculation_details = []
+    total_rows_processed = 0
+    total_rows_used = 0
+    
+    for outcome, g in df_long.groupby("outcome_id"):
+        # For this outcome, only use rows where BOTH importance and satisfaction are valid (1-5)
+        imp_numeric = pd.to_numeric(g["importance"], errors="coerce")
+        sat_numeric = pd.to_numeric(g["satisfaction"], errors="coerce")
+        
+        imp_valid = imp_numeric.between(1, 5, inclusive='both')
+        sat_valid = sat_numeric.between(1, 5, inclusive='both')
+        both_valid = imp_valid & sat_valid
+        
+        # Count statistics for this outcome
+        total_responses_outcome = len(g)
+        valid_responses_outcome = both_valid.sum()
+        dropped_responses_outcome = total_responses_outcome - valid_responses_outcome
+        
+        total_rows_processed += total_responses_outcome
+        total_rows_used += valid_responses_outcome
+        
+        if valid_responses_outcome == 0:
+            # No valid data for this outcome
+            rows.append({
+                "label": label_map.get(str(outcome), str(outcome)),
+                "outcome_id": outcome,
+                "N": 0,
+                "Importance": 0.0,
+                "Satisfaction": 0.0,
+                "Opportunity": 0.0,
+            })
+            calculation_details.append({
+                "outcome_id": outcome,
+                "total_responses": total_responses_outcome,
+                "valid_pairs": valid_responses_outcome,
+                "dropped": dropped_responses_outcome,
+                "imp_4_5_count": 0,
+                "imp_score": 0.0,
+                "sat_4_5_count": 0,
+                "sat_score": 0.0,
+                "opportunity": 0.0,
+                "formula": "No valid data pairs"
+            })
+            continue
+        
+        # Use only valid pairs for calculation
+        valid_data = g[both_valid]
+        
+        # Calculate scores using only valid responses
+        imp_score = calculate_top2_percentage_times_10(valid_data["importance"])
+        sat_score = calculate_top2_percentage_times_10(valid_data["satisfaction"])
         opportunity = imp_score + (imp_score - sat_score)
+        
+        # Count 4s and 5s for debugging
+        imp_4_5_count = (pd.to_numeric(valid_data["importance"], errors="coerce") >= 4).sum()
+        sat_4_5_count = (pd.to_numeric(valid_data["satisfaction"], errors="coerce") >= 4).sum()
+        
+        calculation_details.append({
+            "outcome_id": outcome,
+            "total_responses": total_responses_outcome,
+            "valid_pairs": valid_responses_outcome,
+            "dropped": dropped_responses_outcome,
+            "imp_4_5_count": imp_4_5_count,
+            "imp_score": round(imp_score, 4),
+            "sat_4_5_count": sat_4_5_count,
+            "sat_score": round(sat_score, 4),
+            "opportunity": round(opportunity, 4),
+            "formula": f"{imp_score:.2f} + ({imp_score:.2f} - {sat_score:.2f}) = {opportunity:.2f}"
+        })
         
         rows.append({
             "label": label_map.get(str(outcome), str(outcome)),
             "outcome_id": outcome,
-            "N": n,
+            "N": valid_responses_outcome,
             "Importance": round(imp_score, 2),
             "Satisfaction": round(sat_score, 2),
             "Opportunity": round(opportunity, 2),
@@ -111,8 +171,22 @@ def aggregate(df_long: pd.DataFrame, label_map: Dict[str, str]) -> pd.DataFrame:
         ["Opportunity", "label"], ascending=[False, True], na_position="last"
     ).reset_index(drop=True)
 
-    if dropped > 0:
-        st.info(f"Dropped {dropped} rows outside the 1–5 range or with non-numeric values.")
+    # Show overall data quality summary
+    total_dropped = total_rows_processed - total_rows_used
+    if total_dropped > 0:
+        st.info(f"📊 **Missing Data Summary:** Used {total_rows_used:,} valid response pairs out of {total_rows_processed:,} total responses. Excluded {total_dropped:,} responses with missing or invalid data.")
+    
+    # Show calculation details for debugging
+    if calculation_details:
+        st.markdown("**Calculation Details (per outcome):**")
+        calc_df = pd.DataFrame(calculation_details)
+        st.dataframe(calc_df, use_container_width=True)
+        
+        # Show any outcomes with significant missing data
+        high_missing = calc_df[calc_df["dropped"] / calc_df["total_responses"] > 0.2]  # >20% missing
+        if not high_missing.empty:
+            st.warning(f"⚠️ **High Missing Data Alert:** {len(high_missing)} outcomes have >20% missing responses. Consider reviewing data quality for: {', '.join(high_missing['outcome_id'].tolist())}")
+    
     return out
 
 # =====================================
@@ -172,6 +246,12 @@ with st.expander("How to format your files"):
 - Stems become your `outcome_id`
 - **All importance and satisfaction values must be on a 1–5 scale**
 
+**Missing Data Handling:**
+- For each outcome, only respondents with BOTH importance AND satisfaction values (1-5) are included
+- Missing, blank, or invalid values are excluded per outcome
+- Sample sizes (N) may vary between outcomes based on response completeness
+- This maximizes data usage while ensuring valid comparisons
+
 **Optional label mapping (separate CSV)**  
 Upload a second CSV with columns:  
 `outcome_id,label`  
@@ -180,8 +260,8 @@ Example:
 If provided, labels appear in the table, tooltips, and a legend below the chart.
 
 **Calculation method:**
-- Importance = (Count of 4s and 5s / Total responses) × 10
-- Satisfaction = (Count of 4s and 5s / Total responses) × 10  
+- Importance = (Count of 4s and 5s / Total valid responses) × 10
+- Satisfaction = (Count of 4s and 5s / Total valid responses) × 10  
 - Opportunity = Importance + (Importance - Satisfaction)
         """
     )
@@ -255,6 +335,40 @@ if data_file is not None:
     st.success("Detected wide format and auto-paired columns.")
     st.markdown("**Detected pairs**")
     st.dataframe(pairing, use_container_width=True)
+    
+    # Add data validation summary
+    st.markdown("**Data Validation Summary**")
+    total_rows = len(long_df)
+    
+    # Check importance values
+    imp_numeric = pd.to_numeric(long_df["importance"], errors="coerce")
+    imp_valid_count = imp_numeric.between(1, 5).sum()
+    imp_invalid_count = total_rows - imp_valid_count
+    
+    # Check satisfaction values  
+    sat_numeric = pd.to_numeric(long_df["satisfaction"], errors="coerce")
+    sat_valid_count = sat_numeric.between(1, 5).sum()
+    sat_invalid_count = total_rows - sat_valid_count
+    
+    # Show unique values found
+    imp_unique = sorted([x for x in imp_numeric.dropna().unique() if not pd.isna(x)])
+    sat_unique = sorted([x for x in sat_numeric.dropna().unique() if not pd.isna(x)])
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("**Importance Values:**")
+        st.write(f"• Valid (1-5): {imp_valid_count:,} rows")
+        st.write(f"• Invalid: {imp_invalid_count:,} rows")
+        st.write(f"• Unique values found: {imp_unique}")
+    
+    with col2:
+        st.write("**Satisfaction Values:**")
+        st.write(f"• Valid (1-5): {sat_valid_count:,} rows")
+        st.write(f"• Invalid: {sat_invalid_count:,} rows")  
+        st.write(f"• Unique values found: {sat_unique}")
+    
+    if imp_invalid_count > 0 or sat_invalid_count > 0:
+        st.warning(f"⚠️ Found invalid values. Check your data - all importance and satisfaction values must be between 1 and 5 (integers or decimals).")
 
     st.markdown("### Results")
     agg = aggregate(long_df, label_map)
